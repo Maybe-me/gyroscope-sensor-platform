@@ -1,0 +1,21 @@
+# Java
+*.class
+*.jar
+*.war
+target/
+.idea/
+*.iml
+
+# Node.js
+node_modules/
+dist/
+.DS_Store
+
+# UniApp
+unpackage/
+.hbuilderx/
+
+# IDE
+.vscode/
+*.swp
+*.swo
