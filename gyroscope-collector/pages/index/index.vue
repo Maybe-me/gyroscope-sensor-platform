@@ -117,6 +117,13 @@
         </view>
       </view>
     </view>
+    <!-- 调试日志 -->
+    <view class="card" v-if="debugLogs.length > 0">
+      <view class="card-title">调试日志</view>
+      <view class="debug-logs">
+        <text class="debug-line" v-for="(log, idx) in debugLogs" :key="idx">{{ log }}</text>
+      </view>
+    </view>
   </view>
 </template>
 
@@ -145,7 +152,11 @@ export default {
       durationTimer: null,
       startTime: 0,
       frameCount: 0,
-      lastRateTime: 0
+      lastRateTime: 0,
+      debugLogs: [],
+      _gyroLogged: false,
+      _accelLogged: false,
+      _firstSendLogged: false
     }
   },
   onUnload() {
@@ -169,12 +180,16 @@ export default {
       this.frameCount = 0
       this.startTime = Date.now()
       this.lastRateTime = this.startTime
+      this._gyroLogged = false
+      this._accelLogged = false
+      this._firstSendLogged = false
+      this.addLog('开始采集...')
 
       this.ws = new SensorWebSocket({
         url: this.serverUrl,
-        onConnected: () => { this.connected = true },
-        onDisconnected: () => { this.connected = false },
-        onError: () => { this.connected = false }
+        onConnected: () => { this.connected = true; this.addLog('WebSocket 已连接') },
+        onDisconnected: () => { this.connected = false; this.addLog('WebSocket 已断开') },
+        onError: () => { this.connected = false; this.addLog('WebSocket 连接错误') }
       })
       this.ws.connect()
 
@@ -216,28 +231,38 @@ export default {
     },
 
     startSensors() {
+      this.addLog('startSensors 被调用')
       // #ifdef APP-PLUS
+      this.addLog('进入 APP-PLUS 分支')
       uni.startGyroscope({
         interval: 'ui',
-        success: () => {},
-        fail: (err) => { console.error('陀螺仪启动失败:', err) }
+        success: () => { this.addLog('陀螺仪启动成功') },
+        fail: (err) => { console.error('陀螺仪启动失败:', err); this.addLog('陀螺仪启动失败: ' + JSON.stringify(err)) }
       })
       uni.onGyroscopeChange((res) => {
         this.gyroscope = { x: res.x, y: res.y, z: res.z }
+        if (!this._gyroLogged) {
+          this._gyroLogged = true
+          this.addLog('收到陀螺仪数据: x=' + res.x.toFixed(4))
+        }
       })
 
       uni.startAccelerometer({
         interval: 'ui',
-        success: () => {},
-        fail: (err) => { console.error('加速度计启动失败:', err) }
+        success: () => { this.addLog('加速度计启动成功') },
+        fail: (err) => { console.error('加速度计启动失败:', err); this.addLog('加速度计启动失败: ' + JSON.stringify(err)) }
       })
       uni.onAccelerometerChange((res) => {
         this.accelerometer = { x: res.x, y: res.y, z: res.z }
+        if (!this._accelLogged) {
+          this._accelLogged = true
+          this.addLog('收到加速度计数据: z=' + res.z.toFixed(4))
+        }
       })
 
       uni.startCompass({
-        success: () => {},
-        fail: (err) => { console.error('指南针启动失败:', err) }
+        success: () => { this.addLog('指南针启动成功') },
+        fail: (err) => { console.error('指南针启动失败:', err); this.addLog('指南针启动失败: ' + JSON.stringify(err)) }
       })
       uni.onCompassChange((res) => {
         this.orientation.alpha = res.direction || 0
@@ -245,6 +270,7 @@ export default {
       // #endif
 
       // #ifdef H5
+      this.addLog('进入 H5 分支')
       this._onDeviceMotion = (e) => {
         if (e.rotationRate) {
           // DeviceMotionEvent.rotationRate: alpha=Z-axis, beta=X-axis, gamma=Y-axis
@@ -305,6 +331,10 @@ export default {
       }
       const ok = this.ws.send(payload)
       if (ok) {
+        if (!this._firstSendLogged) {
+          this._firstSendLogged = true
+          this.addLog('首次发送成功, gyro=' + JSON.stringify(this.gyroscope))
+        }
         this.stats.sent++
       } else {
         this.stats.failed++
@@ -323,6 +353,14 @@ export default {
 
     orientBarWidth(val) {
       return Math.min(Math.abs(val) / 360 * 100, 100)
+    },
+
+    addLog(msg) {
+      const time = new Date().toLocaleTimeString()
+      this.debugLogs.unshift(`[${time}] ${msg}`)
+      if (this.debugLogs.length > 20) {
+        this.debugLogs.pop()
+      }
     }
   }
 }
@@ -594,5 +632,19 @@ export default {
   font-size: 24rpx;
   color: #999999;
   margin-top: 4rpx;
+}
+
+.debug-logs {
+  max-height: 400rpx;
+  overflow-y: auto;
+}
+
+.debug-line {
+  display: block;
+  font-size: 22rpx;
+  color: #666666;
+  font-family: monospace;
+  padding: 4rpx 0;
+  border-bottom: 1rpx solid #f0f0f0;
 }
 </style>
