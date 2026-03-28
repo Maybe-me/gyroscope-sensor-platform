@@ -1,6 +1,6 @@
 class SensorWebSocket {
   constructor(options = {}) {
-    this.url = options.url || 'ws://192.168.1.100:8080/ws/sensor'
+    this.url = options.url || 'ws://192.168.43.22:8080/ws/sensor'
     this.reconnectInterval = options.reconnectInterval || 3000
     this.heartbeatInterval = options.heartbeatInterval || 30000
     this.socketTask = null

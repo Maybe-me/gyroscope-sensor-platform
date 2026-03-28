@@ -128,6 +128,7 @@
 </template>
 
 <script>
+import AppSensorManager from '@/utils/appSensors.js'
 import SensorWebSocket from '@/utils/websocket.js'
 
 export default {
@@ -156,6 +157,8 @@ export default {
       debugLogs: [],
       _gyroLogged: false,
       _accelLogged: false,
+      _orientationLogged: false,
+      appSensors: null,
       _firstSendLogged: false
     }
   },
@@ -182,6 +185,7 @@ export default {
       this.lastRateTime = this.startTime
       this._gyroLogged = false
       this._accelLogged = false
+      this._orientationLogged = false
       this._firstSendLogged = false
       this.addLog('开始采集...')
 
@@ -232,79 +236,52 @@ export default {
 
     startSensors() {
       this.addLog('startSensors 被调用')
+    
       // #ifdef APP-PLUS
       this.addLog('进入 APP-PLUS 分支')
-      uni.startGyroscope({
-        interval: 'ui',
-        success: () => { this.addLog('陀螺仪启动成功') },
-        fail: (err) => { console.error('陀螺仪启动失败:', err); this.addLog('陀螺仪启动失败: ' + JSON.stringify(err)) }
-      })
-      uni.onGyroscopeChange((res) => {
-        this.gyroscope = { x: res.x, y: res.y, z: res.z }
-        if (!this._gyroLogged) {
-          this._gyroLogged = true
-          this.addLog('收到陀螺仪数据: x=' + res.x.toFixed(4))
-        }
-      })
 
-      uni.startAccelerometer({
-        interval: 'ui',
-        success: () => { this.addLog('加速度计启动成功') },
-        fail: (err) => { console.error('加速度计启动失败:', err); this.addLog('加速度计启动失败: ' + JSON.stringify(err)) }
-      })
-      uni.onAccelerometerChange((res) => {
-        this.accelerometer = { x: res.x, y: res.y, z: res.z }
-        if (!this._accelLogged) {
-          this._accelLogged = true
-          this.addLog('收到加速度计数据: z=' + res.z.toFixed(4))
-        }
-      })
-
-      uni.startCompass({
-        success: () => { this.addLog('指南针启动成功') },
-        fail: (err) => { console.error('指南针启动失败:', err); this.addLog('指南针启动失败: ' + JSON.stringify(err)) }
-      })
-      uni.onCompassChange((res) => {
-        this.orientation.alpha = res.direction || 0
-      })
-      // #endif
-
-      // #ifdef H5
-      this.addLog('进入 H5 分支')
-      this._onDeviceMotion = (e) => {
-        if (e.rotationRate) {
-          // DeviceMotionEvent.rotationRate: alpha=Z-axis, beta=X-axis, gamma=Y-axis
-          this.gyroscope = {
-            x: e.rotationRate.beta || 0,
-            y: e.rotationRate.gamma || 0,
-            z: e.rotationRate.alpha || 0
+      if (!this.appSensors) {
+        this.appSensors = new AppSensorManager({
+          onLog: (msg) => this.addLog(msg),
+          onGyroscopeChange: (res) => {
+            this.gyroscope = { x: res.x, y: res.y, z: res.z }
+            if (!this._gyroLogged) {
+              this._gyroLogged = true
+              this.addLog('收到首个陀螺仪数据: ' + JSON.stringify(res))
+            }
+          },
+          onAccelerometerChange: (res) => {
+            this.accelerometer = { x: res.x, y: res.y, z: res.z }
+            if (!this._accelLogged) {
+              this._accelLogged = true
+              this.addLog('收到首个加速度计数据: ' + JSON.stringify(res))
+            }
+          },
+          onOrientationChange: (res) => {
+            this.orientation = {
+              alpha: res.alpha,
+              beta: res.beta,
+              gamma: res.gamma
+            }
+            if (!this._orientationLogged) {
+              this._orientationLogged = true
+              this.addLog('收到首个方向数据: ' + JSON.stringify(res))
+            }
           }
-        }
-        if (e.accelerationIncludingGravity) {
-          this.accelerometer = {
-            x: e.accelerationIncludingGravity.x || 0,
-            y: e.accelerationIncludingGravity.y || 0,
-            z: e.accelerationIncludingGravity.z || 0
-          }
-        }
+        })
       }
-      this._onDeviceOrientation = (e) => {
-        this.orientation = {
-          alpha: e.alpha || 0,
-          beta: e.beta || 0,
-          gamma: e.gamma || 0
-        }
-      }
-      window.addEventListener('devicemotion', this._onDeviceMotion)
-      window.addEventListener('deviceorientation', this._onDeviceOrientation)
+
+      this.appSensors.start(this.frequency)
+      this.addLog('App 端传感器启动流程已触发')
       // #endif
     },
 
     stopSensors() {
       // #ifdef APP-PLUS
-      uni.stopGyroscope({ success: () => {}, fail: () => {} })
-      uni.stopAccelerometer({ success: () => {}, fail: () => {} })
-      uni.stopCompass({ success: () => {}, fail: () => {} })
+      if (this.appSensors) {
+        this.appSensors.stop()
+        this.addLog('App 端传感器监听已停止')
+      }
       // #endif
 
       // #ifdef H5
