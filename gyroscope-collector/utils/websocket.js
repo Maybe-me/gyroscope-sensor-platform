@@ -1,3 +1,5 @@
+import { buildHeartbeatEnvelope } from './protocol/envelope.js'
+
 class SensorWebSocket {
   constructor(options = {}) {
     this.url = options.url || 'ws://192.168.43.22:8080/ws/sensor'
@@ -76,7 +78,11 @@ class SensorWebSocket {
   startHeartbeat() {
     this.stopHeartbeat()
     this.heartbeatTimer = setInterval(() => {
-      this.send({ type: 'heartbeat', timestamp: Date.now() })
+      const systemInfo = uni.getSystemInfoSync()
+      this.send(buildHeartbeatEnvelope({
+        deviceId: systemInfo.model || 'unknown-device',
+        systemInfo
+      }))
     }, this.heartbeatInterval)
   }
 

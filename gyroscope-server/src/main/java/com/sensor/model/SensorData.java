@@ -9,6 +9,7 @@ public class SensorData {
     private AxisData gyroscope;
     private AxisData accelerometer;
     private OrientationData orientation;
+    private TemperatureData temperature;
 
     @Data
     public static class AxisData {
@@ -22,5 +23,11 @@ public class SensorData {
         private double alpha;
         private double beta;
         private double gamma;
+    }
+
+    @Data
+    public static class TemperatureData {
+        private Double celsius;
+        private String source;
     }
 }

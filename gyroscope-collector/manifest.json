@@ -7,6 +7,17 @@
     "transformPx" : false,
     "app-plus" : {
         "usingComponents" : true,
+        "permissions" : {
+            "Accelerometer" : {
+                "description" : "加速度传感器"
+            },
+            "Orientation" : {
+                "description" : "方向传感器"
+            },
+            "Invocation" : {
+                "description" : "Native.js"
+            }
+        },
         "distribute" : {
             "android" : {
                 "permissions" : [
@@ -17,7 +28,8 @@
                 ]
             },
             "ios" : {
-                "dSYMs" : false
+                "dSYMs" : false,
+                "NSMotionUsageDescription" : "用于采集设备陀螺仪、方向和运动传感器数据"
             }
         }
     },

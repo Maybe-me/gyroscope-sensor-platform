@@ -1,15 +1,17 @@
 package com.sensor.handler;
 
 import com.google.gson.Gson;
-import com.sensor.model.SensorData;
+import com.sensor.protocol.MessageType;
+import com.sensor.protocol.NormalizedMessage;
+import com.sensor.service.Broadcaster;
+import com.sensor.service.DeviceStateService;
+import com.sensor.service.MessageNormalizer;
+import com.sensor.service.SessionRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.*;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
-
-import java.io.IOException;
-import java.util.concurrent.CopyOnWriteArraySet;
 
 @Component
 public class SensorWebSocketHandler extends TextWebSocketHandler {
@@ -17,17 +19,30 @@ public class SensorWebSocketHandler extends TextWebSocketHandler {
     private static final Logger log = LoggerFactory.getLogger(SensorWebSocketHandler.class);
     private static final Gson gson = new Gson();
 
-    private final CopyOnWriteArraySet<WebSocketSession> monitorSessions = new CopyOnWriteArraySet<>();
-    private final CopyOnWriteArraySet<WebSocketSession> deviceSessions = new CopyOnWriteArraySet<>();
+    private final SessionRegistry sessionRegistry;
+    private final MessageNormalizer messageNormalizer;
+    private final Broadcaster broadcaster;
+    private final DeviceStateService deviceStateService;
+
+    public SensorWebSocketHandler(SessionRegistry sessionRegistry,
+                                  MessageNormalizer messageNormalizer,
+                                  Broadcaster broadcaster,
+                                  DeviceStateService deviceStateService) {
+        this.sessionRegistry = sessionRegistry;
+        this.messageNormalizer = messageNormalizer;
+        this.broadcaster = broadcaster;
+        this.deviceStateService = deviceStateService;
+    }
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
         String path = session.getUri().getPath();
         if (path.contains("/ws/monitor")) {
-            monitorSessions.add(session);
+            sessionRegistry.registerMonitor(session);
             log.info("前端监控页面已连接: {}", session.getId());
+            deviceStateService.replayToMonitor(session);
         } else if (path.contains("/ws/sensor")) {
-            deviceSessions.add(session);
+            sessionRegistry.registerDevice(session);
             log.info("传感器设备已连接: {}", session.getId());
         }
     }
@@ -38,44 +53,39 @@ public class SensorWebSocketHandler extends TextWebSocketHandler {
         log.debug("收到原始数据: {}", payload);
 
         try {
-            SensorData sensorData = gson.fromJson(payload, SensorData.class);
+            NormalizedMessage normalized = messageNormalizer.normalize(payload);
 
-            if (sensorData.getTimestamp() == 0) {
-                sensorData.setTimestamp(System.currentTimeMillis());
+            if (normalized.messageType() == MessageType.HEARTBEAT) {
+                log.debug("收到心跳消息: {}", gson.toJson(normalized.payload()));
+                return;
             }
 
-            String jsonOutput = gson.toJson(sensorData);
-            broadcastToMonitors(jsonOutput);
+            if (normalized.messageType() == MessageType.UNKNOWN) {
+                log.warn("忽略未知消息类型: {}", payload);
+                return;
+            }
+
+            if (normalized.messageType() == MessageType.CAPABILITY || normalized.messageType() == MessageType.STATUS) {
+                deviceStateService.remember(normalized);
+            }
+
+            String jsonOutput = gson.toJson(normalized.payload());
+            broadcaster.broadcastToMonitors(jsonOutput);
 
         } catch (Exception e) {
             log.error("数据解析失败: {}", payload, e);
         }
     }
 
-    private void broadcastToMonitors(String data) {
-        TextMessage message = new TextMessage(data);
-        for (WebSocketSession session : monitorSessions) {
-            if (session.isOpen()) {
-                try {
-                    session.sendMessage(message);
-                } catch (IOException e) {
-                    log.error("发送数据到前端失败: {}", session.getId(), e);
-                }
-            }
-        }
-    }
-
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
-        monitorSessions.remove(session);
-        deviceSessions.remove(session);
+        sessionRegistry.remove(session);
         log.info("连接已关闭: {}", session.getId());
     }
 
     @Override
     public void handleTransportError(WebSocketSession session, Throwable exception) {
         log.error("传输错误: {}", session.getId(), exception);
-        monitorSessions.remove(session);
-        deviceSessions.remove(session);
+        sessionRegistry.remove(session);
     }
 }

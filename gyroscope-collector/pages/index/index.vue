@@ -48,6 +48,21 @@
       </button>
     </view>
 
+    <view class="card">
+      <view class="card-title">传感器状态</view>
+      <view class="sensor-status-list">
+        <view class="sensor-status-item" v-for="item in sensorStatusList" :key="item.key">
+          <view class="sensor-status-main">
+            <text class="sensor-status-label">{{ item.label }}</text>
+            <text class="sensor-status-detail">{{ item.detail }}</text>
+          </view>
+          <text class="sensor-status-badge" :class="sensorStatusClass(item.state)">
+            {{ sensorStatusText(item.state) }}
+          </text>
+        </view>
+      </view>
+    </view>
+
     <!-- 实时数据展示 -->
     <view class="card">
       <view class="card-title">实时传感器数据</view>
@@ -93,6 +108,19 @@
           </view>
         </view>
       </view>
+
+      <view class="sensor-group">
+        <text class="sensor-group-title">温度（°C）</text>
+        <view class="sensor-values">
+          <view class="sensor-item">
+            <text class="axis-label">{{ temperatureSourceShortText(temperature.source) }}</text>
+            <view class="bar-track">
+              <view class="bar-fill temperature" :style="{ width: temperatureBarWidth(temperature.celsius) + '%' }"></view>
+            </view>
+            <text class="axis-value">{{ fmtTemperature(temperature.celsius) }}</text>
+          </view>
+        </view>
+      </view>
     </view>
 
     <!-- 采集统计 -->
@@ -129,6 +157,17 @@
 
 <script>
 import AppSensorManager from '@/utils/appSensors.js'
+import { buildCapabilityEnvelope, buildStatusEnvelope, buildTelemetryEnvelope } from '@/utils/protocol/envelope.js'
+import TelemetryReporter from '@/utils/sensors/reporter.js'
+import {
+  buildCapabilitySnapshot,
+  buildLegacySnapshot,
+  buildStatusSnapshot,
+  createCollectorState,
+  resetCollectorState,
+  updateSensorStatus as updateCollectorSensorStatus,
+  updateSensorValue as updateCollectorSensorValue
+} from '@/utils/sensors/state.js'
 import SensorWebSocket from '@/utils/websocket.js'
 
 export default {
@@ -144,12 +183,10 @@ export default {
       ],
       collecting: false,
       connected: false,
-      gyroscope: { x: 0, y: 0, z: 0 },
-      accelerometer: { x: 0, y: 0, z: 0 },
-      orientation: { alpha: 0, beta: 0, gamma: 0 },
+      sensorState: createCollectorState(),
       stats: { sent: 0, failed: 0, rate: 0, duration: 0 },
       ws: null,
-      collectTimer: null,
+      telemetryReporter: null,
       durationTimer: null,
       startTime: 0,
       frameCount: 0,
@@ -158,8 +195,26 @@ export default {
       _gyroLogged: false,
       _accelLogged: false,
       _orientationLogged: false,
+      _temperatureLogged: false,
       appSensors: null,
       _firstSendLogged: false
+    }
+  },
+  computed: {
+    gyroscope() {
+      return this.sensorState.values.gyroscope
+    },
+    accelerometer() {
+      return this.sensorState.values.accelerometer
+    },
+    orientation() {
+      return this.sensorState.values.orientation
+    },
+    temperature() {
+      return this.sensorState.values.temperature
+    },
+    sensorStatusList() {
+      return Object.values(this.sensorState.statuses)
     }
   },
   onUnload() {
@@ -168,6 +223,35 @@ export default {
   methods: {
     setFrequency(val) {
       this.frequency = val
+    },
+
+    resetSensorState() {
+      resetCollectorState(this.sensorState)
+    },
+
+    updateSensorStatus(sensor, state, detail) {
+      updateCollectorSensorStatus(this.sensorState, sensor, state, detail)
+    },
+
+    updateSensorValue(sensor, value) {
+      updateCollectorSensorValue(this.sensorState, sensor, value)
+    },
+
+    sensorStatusText(state) {
+      const map = {
+        idle: '未启动',
+        starting: '启动中',
+        active: '运行中',
+        stopped: '已停止',
+        unsupported: '不支持',
+        unavailable: '无硬件',
+        error: '异常'
+      }
+      return map[state] || '未知'
+    },
+
+    sensorStatusClass(state) {
+      return `sensor-status-${state || 'idle'}`
     },
 
     toggleCollect() {
@@ -186,24 +270,44 @@ export default {
       this._gyroLogged = false
       this._accelLogged = false
       this._orientationLogged = false
+      this._temperatureLogged = false
       this._firstSendLogged = false
+      this.resetSensorState()
       this.addLog('开始采集...')
 
       this.ws = new SensorWebSocket({
         url: this.serverUrl,
-        onConnected: () => { this.connected = true; this.addLog('WebSocket 已连接') },
+        onConnected: () => {
+          this.connected = true
+          this.addLog('WebSocket 已连接')
+          this.sendCapabilityMessage()
+          this.sendStatusMessage()
+        },
         onDisconnected: () => { this.connected = false; this.addLog('WebSocket 已断开') },
         onError: () => { this.connected = false; this.addLog('WebSocket 连接错误') }
       })
       this.ws.connect()
 
+      if (!this.telemetryReporter) {
+        this.telemetryReporter = new TelemetryReporter({
+          getPayload: () => this.buildTelemetryPayload(),
+          send: (payload) => this.ws ? this.ws.send(payload) : false,
+          onSuccess: () => {
+            if (!this._firstSendLogged) {
+              this._firstSendLogged = true
+              this.addLog('首次发送成功, gyro=' + JSON.stringify(this.gyroscope))
+            }
+            this.stats.sent++
+          },
+          onFailure: () => {
+            this.stats.failed++
+          }
+        })
+      }
+
       this.collecting = true
       this.startSensors()
-
-      const interval = Math.round(1000 / this.frequency)
-      this.collectTimer = setInterval(() => {
-        this.sendData()
-      }, interval)
+      this.telemetryReporter.start(this.frequency)
 
       this.durationTimer = setInterval(() => {
         this.stats.duration = Math.round((Date.now() - this.startTime) / 1000)
@@ -217,16 +321,17 @@ export default {
     },
 
     stopCollect() {
-      this.collecting = false
-      if (this.collectTimer) {
-        clearInterval(this.collectTimer)
-        this.collectTimer = null
+      if (this.telemetryReporter) {
+        this.telemetryReporter.stop()
       }
       if (this.durationTimer) {
         clearInterval(this.durationTimer)
         this.durationTimer = null
       }
       this.stopSensors()
+      this.sendStatusMessage()
+      this.sendCapabilityMessage()
+      this.collecting = false
       if (this.ws) {
         this.ws.close()
         this.ws = null
@@ -243,29 +348,45 @@ export default {
       if (!this.appSensors) {
         this.appSensors = new AppSensorManager({
           onLog: (msg) => this.addLog(msg),
+          onStatusChange: (sensor, state, detail) => {
+            this.updateSensorStatus(sensor, state, detail)
+            this.sendCapabilityMessage()
+            this.sendStatusMessage()
+          },
           onGyroscopeChange: (res) => {
-            this.gyroscope = { x: res.x, y: res.y, z: res.z }
+            this.updateSensorValue('gyroscope', { x: res.x, y: res.y, z: res.z })
+            this.updateSensorStatus('gyroscope', 'active', '已接收数据')
             if (!this._gyroLogged) {
               this._gyroLogged = true
               this.addLog('收到首个陀螺仪数据: ' + JSON.stringify(res))
             }
           },
           onAccelerometerChange: (res) => {
-            this.accelerometer = { x: res.x, y: res.y, z: res.z }
+            this.updateSensorValue('accelerometer', { x: res.x, y: res.y, z: res.z })
+            this.updateSensorStatus('accelerometer', 'active', '已接收数据')
             if (!this._accelLogged) {
               this._accelLogged = true
               this.addLog('收到首个加速度计数据: ' + JSON.stringify(res))
             }
           },
           onOrientationChange: (res) => {
-            this.orientation = {
+            this.updateSensorValue('orientation', {
               alpha: res.alpha,
               beta: res.beta,
               gamma: res.gamma
-            }
+            })
+            this.updateSensorStatus('orientation', 'active', '已接收数据')
             if (!this._orientationLogged) {
               this._orientationLogged = true
               this.addLog('收到首个方向数据: ' + JSON.stringify(res))
+            }
+          },
+          onTemperatureChange: (res) => {
+            this.updateSensorValue('temperature', { celsius: res.celsius, source: res.source || null })
+            this.updateSensorStatus('temperature', 'active', `${this.temperatureSourceText(res.source)}已接收数据`)
+            if (!this._temperatureLogged) {
+              this._temperatureLogged = true
+              this.addLog('收到首个温度数据: ' + JSON.stringify(res))
             }
           }
         })
@@ -296,26 +417,50 @@ export default {
       // #endif
     },
 
-    sendData() {
-      if (!this.ws) return
+    buildTelemetryPayload() {
       this.frameCount++
-      const payload = {
-        deviceId: uni.getSystemInfoSync().model || 'unknown-device',
-        timestamp: Date.now(),
-        gyroscope: { ...this.gyroscope },
-        accelerometer: { ...this.accelerometer },
-        orientation: { ...this.orientation }
-      }
-      const ok = this.ws.send(payload)
-      if (ok) {
-        if (!this._firstSendLogged) {
-          this._firstSendLogged = true
-          this.addLog('首次发送成功, gyro=' + JSON.stringify(this.gyroscope))
-        }
-        this.stats.sent++
-      } else {
-        this.stats.failed++
-      }
+      const systemInfo = uni.getSystemInfoSync()
+      const snapshot = buildLegacySnapshot(this.sensorState)
+      const statusSnapshot = buildStatusSnapshot(this.sensorState)
+      const payload = buildTelemetryEnvelope({
+        deviceId: systemInfo.model || 'unknown-device',
+        systemInfo,
+        frequency: this.frequency,
+        sensorStatus: statusSnapshot,
+        gyroscope: snapshot.gyroscope,
+        accelerometer: snapshot.accelerometer,
+        orientation: snapshot.orientation,
+        temperature: snapshot.temperature
+      })
+      return payload
+    },
+
+    buildCapabilityPayload() {
+      const systemInfo = uni.getSystemInfoSync()
+      return buildCapabilityEnvelope({
+        deviceId: systemInfo.model || 'unknown-device',
+        systemInfo,
+        capabilities: buildCapabilitySnapshot(this.sensorState)
+      })
+    },
+
+    buildStatusPayload() {
+      const systemInfo = uni.getSystemInfoSync()
+      return buildStatusEnvelope({
+        deviceId: systemInfo.model || 'unknown-device',
+        systemInfo,
+        statuses: buildStatusSnapshot(this.sensorState)
+      })
+    },
+
+    sendCapabilityMessage() {
+      if (!this.ws) return false
+      return this.ws.send(this.buildCapabilityPayload())
+    },
+
+    sendStatusMessage() {
+      if (!this.ws) return false
+      return this.ws.send(this.buildStatusPayload())
     },
 
     fmt(val) {
@@ -330,6 +475,32 @@ export default {
 
     orientBarWidth(val) {
       return Math.min(Math.abs(val) / 360 * 100, 100)
+    },
+
+    temperatureBarWidth(val) {
+      if (val === null || typeof val === 'undefined' || Number.isNaN(Number(val))) {
+        return 0
+      }
+      return Math.min(Math.max(Number(val), 0), 60) / 60 * 100
+    },
+
+    fmtTemperature(val) {
+      if (val === null || typeof val === 'undefined' || Number.isNaN(Number(val))) {
+        return '--'
+      }
+      return `${Number(val).toFixed(2)} °C`
+    },
+
+    temperatureSourceText(source) {
+      if (source === 'ambient') return '环境温度'
+      if (source === 'battery') return '电池温度'
+      return '温度'
+    },
+
+    temperatureSourceShortText(source) {
+      if (source === 'ambient') return 'ENV'
+      if (source === 'battery') return 'BAT'
+      return 'TEMP'
     },
 
     addLog(msg) {
@@ -413,6 +584,74 @@ export default {
   margin-bottom: 20rpx;
   padding-left: 12rpx;
   border-left: 6rpx solid #1890ff;
+}
+
+.sensor-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12rpx;
+}
+
+.sensor-status-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18rpx 20rpx;
+  border-radius: 12rpx;
+  background: #fafafa;
+}
+
+.sensor-status-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6rpx;
+}
+
+.sensor-status-label {
+  font-size: 28rpx;
+  color: #333333;
+  font-weight: 600;
+}
+
+.sensor-status-detail {
+  font-size: 24rpx;
+  color: #999999;
+}
+
+.sensor-status-badge {
+  min-width: 112rpx;
+  text-align: center;
+  padding: 8rpx 16rpx;
+  border-radius: 999rpx;
+  font-size: 22rpx;
+  font-weight: 600;
+}
+
+.sensor-status-idle,
+.sensor-status-stopped {
+  color: #666666;
+  background: #f0f0f0;
+}
+
+.sensor-status-starting {
+  color: #d48806;
+  background: #fff7e6;
+}
+
+.sensor-status-active {
+  color: #389e0d;
+  background: #f6ffed;
+}
+
+.sensor-status-unsupported,
+.sensor-status-unavailable {
+  color: #531dab;
+  background: #f9f0ff;
+}
+
+.sensor-status-error {
+  color: #cf1322;
+  background: #fff1f0;
 }
 
 .input-row {
@@ -567,6 +806,10 @@ export default {
 
 .bar-fill.orientation {
   background: #722ed1;
+}
+
+.bar-fill.temperature {
+  background: #fa8c16;
 }
 
 .axis-value {
